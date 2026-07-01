@@ -1,8 +1,14 @@
 import User from "../models/user.model.js";
+import Session from "../models/session.model.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { comparePassword, hashPassword } from "../utils/hashpassword.utils.js";
 import generateToken from "../utils/generateJwtToken.js";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+} from "../utils/jwt.utils.js";
+import { hashRefreshToken, compareRefreshToken } from "../utils/token.utils.js";
 
 export const signup = async (req, res) => {
   try {
@@ -44,53 +50,88 @@ export const login = async (req, res) => {
     const user = await User.findOne({ email });
 
     if (!user) {
-      console.log("User not found");
-
       return res.status(401).json({
-        error: "User not found!",
+        message: "User not found",
+      });
+    }
+    if (user.isBlocked) {
+      return res.status(403).json({
+        message: "Your account has been blocked.",
       });
     }
 
-    const passwordMatch = await comparePassword(password, user.password);
+    const isPasswordMatch = await comparePassword(password, user.password);
 
-    if (!passwordMatch) {
+    if (!isPasswordMatch) {
       return res.status(401).json({
-        error: "Authentication failed",
+        message: "Invalid credentials",
       });
     }
 
-    const token = await generateToken(user);
+    const session = await Session.create({
+      userId: user._id,
+      refreshTokenHash: "",
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
 
-    res.cookie("authToken", token, {
+    const refreshToken = generateRefreshToken(session);
+
+    const refreshTokenHash = await hashRefreshToken(refreshToken);
+
+    session.refreshTokenHash = refreshTokenHash;
+    await session.save();
+
+    const accessToken = generateAccessToken(user);
+
+    res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
-      secure: true,
-      sameSite: "none",
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
+
     const userResponse = user.toObject();
     delete userResponse.password;
-    console.log("User------>" ,user,"Token------>",token);
-    
-    return res.status(200).json({ user: userResponse, token: token });
-  } catch (err) {
-    console.error("Login error:", err);
+
+    return res.status(200).json({
+      user: userResponse,
+      accessToken,
+    });
+  } catch (error) {
+    console.error(error);
 
     return res.status(500).json({
-      error: err.message || "Login failed",
+      message: "Login failed",
     });
   }
 };
 
 export const logout = async (req, res) => {
-  res.clearCookie("authToken", {
-    httpOnly: true,
-    secure: true,
-    sameSite: "none",
-    path: "/",
-  });
-  res.status(200).json({
-    message: "Logged out successfully",
-  });
+  try {
+    const refreshToken = req.cookies.refreshToken;
+
+    if (refreshToken) {
+      try {
+        const decoded = jwt.verify(
+          refreshToken,
+          process.env.REFRESH_TOKEN_SECRET,
+        );
+
+        await Session.findByIdAndDelete(decoded.sessionId);
+      } catch (err) {
+      }
+    }
+  } finally {
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+    });
+
+    return res.status(200).json({
+      message: "Logged out successfully",
+    });
+  }
 };
 
 export const getProfile = async (req, res) => {
@@ -205,5 +246,94 @@ export const updatePassword = async (req, res) => {
   } catch (error) {
     console.error("Update password error:", error);
     res.status(500).json({ error: "Failed to update password" });
+  }
+};
+
+export const emailCheck = async (req, res) => {
+  const email = req.body.email;
+  try {
+    const isEmail = await User.findOne({ email: email });
+    if (isEmail) {
+      return res.status(200).json({ message: "Email Exist", exists: true });
+    } else {
+      return res
+        .status(400)
+        .json({ message: "Email dose not  exist", exists: false });
+    }
+  } catch (error) {
+    console.error("Update password error:", error);
+    res.status(500).json({ error: "Failed to update password" });
+  }
+};
+
+export const refreshToken = async (req, res) => {
+  try {
+    const refreshToken = req.cookies.refreshToken;
+
+    if (!refreshToken) {
+      return res.status(401).json({
+        message: "Refresh token missing",
+      });
+    }
+
+    const decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+
+    const session = await Session.findById(decoded.sessionId);
+
+    if (!session) {
+      return res.status(401).json({
+        message: "Session not found",
+      });
+    }
+
+    if (session.expiresAt < new Date()) {
+      return res.status(401).json({
+        message: "Session expired",
+      });
+    }
+
+    const isValid = await compareRefreshToken(
+      refreshToken,
+      session.refreshTokenHash,
+    );
+
+    if (!isValid) {
+      return res.status(401).json({
+        message: "Invalid refresh token",
+      });
+    }
+
+    const user = await User.findById(session.userId);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+    if (user.isBlocked) {
+      await Session.findByIdAndDelete(session._id);
+
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+      });
+
+      return res.status(403).json({
+        message: "Your account has been blocked.",
+      });
+    }
+
+    const accessToken = generateAccessToken(user);
+
+    return res.status(200).json({
+      accessToken,
+    });
+  } catch (error) {
+    console.error(error);
+
+    return res.status(401).json({
+      message: "Invalid refresh token",
+    });
   }
 };

@@ -8,6 +8,8 @@ import {
   updateProfile,
   verifyPassword,
   updatePassword,
+  emailCheck,
+  refreshToken,
 } from "../controllers/user.controller.js";
 import { verifyToken } from "../middlewares/auth.middlewares.js";
 
@@ -19,6 +21,8 @@ router.get("/", (req, res) => {
 router.post("/signup", signup);
 router.post("/me", verifyToken, me);
 router.post("/login", login);
+router.post("/check-email", emailCheck);
+router.post("/refresh", refreshToken);
 router.post("/logout", logout);
 router.get("/profile", verifyToken, getProfile);
 router.put("/profile/update", verifyToken, updateProfile); // NEW
